@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% load static %}
+{% load common_extras %}
 
 {% block title %}{% if is_edit %}Edit Post{% else %}New Post{% endif %} - {{ workspace.name }} - Brightbean{% endblock %}
 
@@ -769,7 +770,7 @@
 
                 <!-- Tags (dropdown with search & create) -->
                 <div class="relative" x-data="{
-                    tags: {{ post.tags|default:'[]'|safe }},
+                    tags: {{ post.tags|json_attr }},
                     tagDropdownOpen: false,
                     tagSearch: '',
                     allTags: [{% for tag in all_tags %}'{{ tag.name|escapejs }}'{% if not forloop.last %},{% endif %}{% endfor %}],
@@ -1364,17 +1365,21 @@
 {% endblock %}
 
 {% block extra_js %}
+{{ selected_account_ids|json_script:"composer-selected-accounts" }}
+{{ char_limits|json_script:"composer-char-limits" }}
+{{ platform_extras|json_script:"composer-platform-extras" }}
+{{ media_items|json_script:"composer-media-items" }}
 <script nonce="{{ request.csp_nonce }}">
 function composerApp() {
     return {
         // State
         title: '{{ form.title.value|default:""|escapejs }}',
         caption: '{{ form.caption.value|default:""|escapejs }}',
-        selectedAccounts: {{ selected_account_ids|safe }},
-        charLimits: {{ char_limits_json|safe }},
+        selectedAccounts: JSON.parse(document.getElementById('composer-selected-accounts').textContent),
+        charLimits: JSON.parse(document.getElementById('composer-char-limits').textContent),
         overrides: {},
         advancedOpen: {},
-        platformExtras: {{ platform_extras_json|default:"{}"|safe }},
+        platformExtras: JSON.parse(document.getElementById('composer-platform-extras').textContent) || {},
         showMediaPicker: false,
         showThumbnailPicker: false,
         thumbnailPickerAccId: null,
@@ -1385,7 +1390,7 @@ function composerApp() {
         lastSaved: null,
         previewTimer: null,
         autosavedPostId: '{{ post.id|default:"" }}',
-        mediaItems: {{ media_items_json|safe }},
+        mediaItems: JSON.parse(document.getElementById('composer-media-items').textContent),
 
         // Computed-like getters for title field visibility
         get anyPlatformNeedsTitle() {
@@ -1581,6 +1586,9 @@ function composerApp() {
         },
 
         onFormSaved(event) {
+            // Only react to the form's own submit, not htmx requests bubbling from
+            // child elements (e.g. the pending-media remove button).
+            if (event.detail.elt !== event.currentTarget) return;
             const xhr = event.detail.xhr;
             if (event.detail.successful) {
                 const action = document.getElementById('publish-action-btn')?.value;
@@ -1719,7 +1727,11 @@ function composerApp() {
                 if (xhr.status >= 200 && xhr.status < 300) {
                     // Replace the upload placeholder with the server-rendered thumb
                     thumb.insertAdjacentHTML('afterend', xhr.responseText);
+                    const inserted = thumb.nextElementSibling;
                     thumb.remove();
+                    if (inserted && window.htmx) {
+                        window.htmx.process(inserted.parentElement);
+                    }
                     if (self.autosavedPostId && !self.uploadUrl.includes(self.autosavedPostId)) {
                         self.uploadUrl = `/workspace/{{ workspace.id }}/compose/${self.autosavedPostId}/upload-media/`;
                     }
@@ -1782,24 +1794,6 @@ function composerApp() {
             });
         }
     };
-}
-
-async function removePendingMedia(assetId, url, btn) {
-    const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value
-        || document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
-    try {
-        const resp = await fetch(url, {
-            method: 'POST',
-            headers: { 'X-CSRFToken': csrfToken },
-        });
-        if (resp.ok) {
-            const html = await resp.text();
-            document.getElementById('media-list').innerHTML = html;
-            document.body.dispatchEvent(new CustomEvent('previewUpdate'));
-        }
-    } catch (err) {
-        console.error('Remove failed:', err);
-    }
 }
 
 /* ── Publish Split-Button (vanilla JS) ────────────────────────── */

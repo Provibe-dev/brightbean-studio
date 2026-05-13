@@ -12,7 +12,9 @@ from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
 
+from apps.common.validators import is_valid_hex_color
 from apps.composer.models import ContentCategory, PlatformPost, Post
+from apps.members.decorators import require_permission
 from apps.members.models import WorkspaceMembership
 from apps.social_accounts.models import SocialAccount
 from apps.workspaces.models import Workspace
@@ -882,10 +884,11 @@ def save_posting_slot(request, workspace_id):
 def delete_posting_slot(request, workspace_id, slot_id):
     """Delete a posting slot."""
     workspace = _get_workspace(request, workspace_id)
-    slot = get_object_or_404(PostingSlot, id=slot_id)
-    # Verify the slot belongs to this workspace
-    if slot.social_account.workspace_id != workspace.id:
-        return JsonResponse({"error": "Not found."}, status=404)
+    slot = get_object_or_404(
+        PostingSlot,
+        id=slot_id,
+        social_account__workspace=workspace,
+    )
 
     account_id = str(slot.social_account_id)
     slot.delete()
@@ -946,9 +949,11 @@ def toggle_posting_slot_day(request, workspace_id):
 def update_posting_slot(request, workspace_id, slot_id):
     """Update a posting slot's time."""
     workspace = _get_workspace(request, workspace_id)
-    slot = get_object_or_404(PostingSlot, id=slot_id)
-    if slot.social_account.workspace_id != workspace.id:
-        return JsonResponse({"error": "Not found."}, status=404)
+    slot = get_object_or_404(
+        PostingSlot,
+        id=slot_id,
+        social_account__workspace=workspace,
+    )
 
     time_str = request.POST.get("time")
     if not time_str:
@@ -1021,11 +1026,17 @@ def queue_create(request, workspace_id):
 
     account = get_object_or_404(SocialAccount, id=account_id, workspace=workspace)
 
+    # Scope category to the same workspace — without this, the queue could be
+    # bound to a category from another workspace via a forged POST.
+    category = None
+    if category_id:
+        category = get_object_or_404(ContentCategory, id=category_id, workspace=workspace)
+
     Queue.objects.create(
         workspace=workspace,
         name=name,
         social_account=account,
-        category_id=category_id,
+        category=category,
     )
 
     if request.htmx:
@@ -1093,6 +1104,7 @@ def queue_reorder(request, workspace_id, queue_id):
 
 
 @login_required
+@require_permission("create_posts")
 @require_POST
 def event_create(request, workspace_id):
     """Create a custom calendar event via HTMX."""
@@ -1105,6 +1117,9 @@ def event_create(request, workspace_id):
 
     if not title or not start_date_str or not end_date_str:
         return JsonResponse({"error": "Title, start date, and end date required."}, status=400)
+
+    if not is_valid_hex_color(color):
+        return JsonResponse({"error": "Color must be a 6-digit hex value like #3B82F6."}, status=400)
 
     try:
         start = date.fromisoformat(start_date_str)
@@ -1131,6 +1146,7 @@ def event_create(request, workspace_id):
 
 
 @login_required
+@require_permission("create_posts")
 @require_POST
 def event_edit(request, workspace_id, event_id):
     """Edit a custom calendar event."""
@@ -1139,7 +1155,10 @@ def event_edit(request, workspace_id, event_id):
 
     event.title = request.POST.get("title", event.title).strip()
     event.description = request.POST.get("description", event.description).strip()
-    event.color = request.POST.get("color", event.color)
+    new_color = request.POST.get("color", event.color)
+    if not is_valid_hex_color(new_color):
+        return JsonResponse({"error": "Color must be a 6-digit hex value like #3B82F6."}, status=400)
+    event.color = new_color
 
     import contextlib
 
@@ -1160,6 +1179,7 @@ def event_edit(request, workspace_id, event_id):
 
 
 @login_required
+@require_permission("create_posts")
 @require_POST
 def event_delete(request, workspace_id, event_id):
     """Delete a custom calendar event."""

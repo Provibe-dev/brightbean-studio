@@ -47,6 +47,7 @@ THIRD_PARTY_APPS = [
 ]
 
 LOCAL_APPS = [
+    "apps.common",
     "apps.accounts",
     "apps.organizations",
     "apps.workspaces",
@@ -179,6 +180,11 @@ if STORAGE_BACKEND.lower() == "s3":
         "CacheControl": "max-age=86400",
     }
 else:
+    # Local FS fallback so dev + test environments without S3 credentials
+    # can still call default_storage / save uploaded files.
+    STORAGES["default"] = {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    }
     MEDIA_ROOT = env("MEDIA_ROOT", default=str(BASE_DIR / "media"))
     MEDIA_URL = "/media/"
 
@@ -301,25 +307,59 @@ _GOOGLE_CREDENTIALS = {
     "client_id": env("PLATFORM_GOOGLE_CLIENT_ID", default=""),
     "client_secret": env("PLATFORM_GOOGLE_CLIENT_SECRET", default=""),
 }
-_INSTAGRAM_PERSONAL_CREDENTIALS = {
+_INSTAGRAM_LOGIN_CREDENTIALS = {
     "app_id": env("PLATFORM_INSTAGRAM_APP_ID", default=""),
     "app_secret": env("PLATFORM_INSTAGRAM_APP_SECRET", default=""),
 }
-_LINKEDIN_CREDENTIALS = {
-    "client_id": env("PLATFORM_LINKEDIN_CLIENT_ID", default=""),
-    "client_secret": env("PLATFORM_LINKEDIN_CLIENT_SECRET", default=""),
+_LINKEDIN_LEGACY_CLIENT_ID = env("PLATFORM_LINKEDIN_CLIENT_ID", default="")
+_LINKEDIN_LEGACY_CLIENT_SECRET = env("PLATFORM_LINKEDIN_CLIENT_SECRET", default="")
+
+# LinkedIn Company always uses Community Management API scopes (the only path that
+# works for Company Pages). Falls back to legacy shared creds for backward compat.
+_LINKEDIN_COMPANY_CREDENTIALS = {
+    "client_id": env("PLATFORM_LINKEDIN_COMPANY_CLIENT_ID", default="") or _LINKEDIN_LEGACY_CLIENT_ID,
+    "client_secret": env("PLATFORM_LINKEDIN_COMPANY_CLIENT_SECRET", default="") or _LINKEDIN_LEGACY_CLIENT_SECRET,
 }
+
+# LinkedIn Personal credential resolution + auto-derived OAuth mode:
+#   1. PLATFORM_LINKEDIN_PERSONAL_* set -> dedicated personal app -> OIDC + Share scopes
+#      (the only personal-posting tier obtainable without CM approval)
+#   2. Else, reuse the company app -> CM scopes (refresh tokens + inbox supported)
+#   3. Else, empty placeholder
+# `_oauth_mode` is computed here, never user-set; it lives in the credentials dict
+# so the provider can branch on it without importing settings.
+_LINKEDIN_PERSONAL_CLIENT_ID = env("PLATFORM_LINKEDIN_PERSONAL_CLIENT_ID", default="")
+if _LINKEDIN_PERSONAL_CLIENT_ID:
+    _LINKEDIN_PERSONAL_CREDENTIALS = {
+        "client_id": _LINKEDIN_PERSONAL_CLIENT_ID,
+        "client_secret": env("PLATFORM_LINKEDIN_PERSONAL_CLIENT_SECRET", default=""),
+        "_oauth_mode": "oidc",
+    }
+elif _LINKEDIN_COMPANY_CREDENTIALS["client_id"]:
+    _LINKEDIN_PERSONAL_CREDENTIALS = {
+        **_LINKEDIN_COMPANY_CREDENTIALS,
+        "_oauth_mode": "community_management",
+    }
+else:
+    # No LinkedIn env vars set. Keep `_oauth_mode` out so the dict's values are all
+    # falsy and `_get_configured_platforms()` doesn't false-positive (it treats any
+    # truthy credential value as "configured"). The provider defaults to OIDC mode
+    # via `_is_oidc_mode` if it ever sees an empty credentials dict.
+    _LINKEDIN_PERSONAL_CREDENTIALS = {"client_id": "", "client_secret": ""}
 
 PLATFORM_CREDENTIALS_FROM_ENV = {
     # Meta platforms - Facebook, Instagram, and Threads share the same app
     "facebook": _META_CREDENTIALS,
     "instagram": _META_CREDENTIALS,
     "threads": _META_CREDENTIALS,
-    # Instagram (Personal) - uses Instagram Login with separate Instagram App credentials
-    "instagram_personal": _INSTAGRAM_PERSONAL_CREDENTIALS,
-    # LinkedIn - personal and company page variants share one Community Management API app
-    "linkedin_personal": _LINKEDIN_CREDENTIALS,
-    "linkedin_company": _LINKEDIN_CREDENTIALS,
+    # Instagram (Direct) - uses Instagram Login with separate Instagram App credentials.
+    # Despite the platform key, this targets Professional (Business/Creator) IG accounts
+    # without requiring a linked Facebook Page. See providers/instagram_login.py.
+    "instagram_login": _INSTAGRAM_LOGIN_CREDENTIALS,
+    # LinkedIn - personal can run on its own OIDC + Share app (Path A) or reuse the
+    # company app's Community Management API credentials (Path B). See README.
+    "linkedin_personal": _LINKEDIN_PERSONAL_CREDENTIALS,
+    "linkedin_company": _LINKEDIN_COMPANY_CREDENTIALS,
     "tiktok": {
         "client_key": env("PLATFORM_TIKTOK_CLIENT_KEY", default=""),
         "client_secret": env("PLATFORM_TIKTOK_CLIENT_SECRET", default=""),
@@ -341,6 +381,7 @@ PLATFORM_CREDENTIALS_FROM_ENV = {
 
 # Webhook verification
 FACEBOOK_WEBHOOK_VERIFY_TOKEN = env("FACEBOOK_WEBHOOK_VERIFY_TOKEN", default="")
+INSTAGRAM_LOGIN_WEBHOOK_VERIFY_TOKEN = env("INSTAGRAM_LOGIN_WEBHOOK_VERIFY_TOKEN", default="")
 YOUTUBE_WEBHOOK_SECRET = env("YOUTUBE_WEBHOOK_SECRET", default="")
 
 # Rate limiting
